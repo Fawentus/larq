@@ -47,6 +47,7 @@ lq.layers.QuantDense(64, kernel_quantizer=lq.quantizers.SteSign(clip_value=1.0))
 from typing import Callable, Union
 
 import tensorflow as tf
+from scipy.stats import bernoulli
 from packaging import version
 
 from larq import context, math
@@ -63,6 +64,7 @@ __all__ = [
     "Quantizer",
     "SteHeaviside",
     "SteSign",
+    "MySteSign",
     "SteTern",
     "SwishSign",
 ]
@@ -753,3 +755,49 @@ def get_kernel_quantizer(identifier):
     if isinstance(quantizer, _BaseQuantizer) and not quantizer._custom_metrics:
         quantizer._custom_metrics = list(context.get_training_metrics())
     return quantizer
+
+
+# My code
+
+@utils.register_alias("my_ste_sign")
+@utils.register_keras_custom_object
+class MySteSign(_BaseQuantizer):
+    precision = 1
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def call(self, inputs):
+        parent = inputs.copy()
+        outputs = ste_sign(inputs) # my_ste_sign(inputs)
+
+        best_child = parent
+        n = len(inputs)
+
+        for i in range(1000):
+            child = parent.copy()
+            b = bernoulli.rvs(size=n, p=1/n)
+            for i in range(n):
+                if b[i] == 1:
+                    child[i] = -child[i]
+            if self.losses[0](child) < self.losses[0](best_child):
+                best_child = child
+
+        return super().call(best_child)
+
+
+def my_ste_sign(x: tf.Tensor) -> tf.Tensor:
+    @tf.custom_gradient
+    def _call(x):
+        def grad(dy):
+            return _zero_gradient(x, dy)
+
+        return math.sign(x), grad
+
+    return _call(x)
+
+
+def _zero_gradient(x, dy):
+    zeros = tf.zeros_like(dy)
+    mask = tf.math.less_equal(tf.math.abs(x), -1)
+    return tf.where(mask, dy, zeros)
